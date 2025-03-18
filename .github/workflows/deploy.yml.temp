@@ -1,0 +1,198 @@
+name: Deploy Monorepo Projects
+
+on:
+  push:
+    branches:
+      - dev
+      - stg
+      - main
+    paths:
+      - 'apps/www/**'
+      - 'apps/admin/**'
+      - 'apps/member/**'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy"
+        required: true
+        default: "main"
+
+jobs:
+  deploy:
+    name: Deploy to Vercel and Invalidate CloudFront
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project:
+          - www
+          - admin
+          - member
+
+    steps:
+      # 1. 슬랙 알림: 배포 시작
+      - name: Notify Slack - Start
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": ":rocket: Deployment started for `${{ matrix.project }}` on branch `${{ github.ref_name }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # 2. Checkout the repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2  # 이전 커밋 이력도 가져오기
+
+      # 3. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: 'yarn'
+
+      # 4. Set up AWS CLI
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 5. Install dependencies
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      # 6. Determine if the project needs to be built
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet HEAD^ HEAD -- apps/${{ matrix.project }}; then
+            echo "no_changes=true" >> $GITHUB_ENV
+          else
+            echo "no_changes=false" >> $GITHUB_ENV
+          fi
+          
+      # 7. Skip if no changes
+      - name: Skip if no changes
+        if: env.no_changes == 'true'
+        run: echo "No changes detected for ${{ matrix.project }}. Skipping build and deploy."
+
+      # 8. Build the project
+      - name: Build ${{ matrix.project }}
+        if: env.no_changes == 'false'
+        run: yarn build:vercel:${{ matrix.project }}
+
+      # 9. Set UPPERCASE environment variables
+      - name: Set UPPERCASE environment variables
+        run: |
+          PROJECT_UPPER=$(echo "${{ matrix.project }}" | tr '[:lower:]' '[:upper:]')
+          BRANCH_UPPER=$(echo "${{ github.ref_name }}" | tr '[:lower:]' '[:upper:]')
+          echo "PROJECT_UPPER=$PROJECT_UPPER" >> $GITHUB_ENV
+          echo "BRANCH_UPPER=$BRANCH_UPPER" >> $GITHUB_ENV
+
+      # 10. Trigger Vercel Deployment
+      - name: Trigger Vercel Deployment
+        id: trigger
+        run: |
+          echo "Triggering deploy for $PROJECT_UPPER on branch $BRANCH_UPPER..."
+          RESPONSE=$(curl -X POST "${{ secrets[format('VERCEL_DEPLOY_HOOK_%s_%s', env.PROJECT_UPPER, env.BRANCH_UPPER)] }}")
+          echo "Response: $RESPONSE"
+
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job.id')
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" == "null" ]; then
+            echo "Failed to extract JOB_ID. Exiting..."
+            exit 1
+          fi
+
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      # 11. Wait for Vercel Deployment to Complete
+      - name: Wait for Vercel Deployment
+        env:
+            VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+            echo "Waiting for deployment of ${{ matrix.project }} on branch ${{ github.ref_name }}..."
+            
+            PROJECT_NAME="monorepo-modulabs-${{ matrix.project }}"
+            START_TIME=$(date +%s)
+            MAX_WAIT_TIME=600  # 10분 타임아웃
+            
+            while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+            
+            if [ $ELAPSED_TIME -gt $MAX_WAIT_TIME ]; then
+                echo "배포 시간이 초과되었습니다 (10분)"
+                exit 1
+            fi
+            
+            RESPONSE=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+                "https://api.vercel.com/v6/deployments?project=$PROJECT_NAME&teamId=${{ secrets.VERCEL_TEAM_ID }}&limit=1")
+            
+            if [ $? -ne 0 ]; then
+                echo "Vercel API 요청 실패"
+                exit 1
+            }
+            
+            STATE=$(echo "$RESPONSE" | jq -r '.deployments[0].state')
+            CREATED_AT=$(echo "$RESPONSE" | jq -r '.deployments[0].created')
+            
+            # 현재 시간과 배포 시작 시간을 비교
+            if [ $((CREATED_AT/1000)) -gt $START_TIME ]; then
+                echo "현재 배포 상태: $STATE"
+                
+                if [ "$STATE" = "READY" ]; then
+                echo "배포가 성공적으로 완료되었습니다!"
+                break
+                elif [ "$STATE" = "ERROR" ]; then
+                echo "배포 실패"
+                exit 1
+                fi
+            else
+                echo "새로운 배포를 기다리는 중..."
+            fi
+            
+            sleep 10
+            done
+
+            echo "Deployment succeeded for project: $PROJECT_NAME!"
+
+      # 12. Invalidate CloudFront Cache
+      - name: Invalidate CloudFront cache
+        if: env.no_changes == 'false'
+        run: |
+          echo "Invalidating CloudFront cache for ${{ matrix.project }}..."
+          if [ "${{ matrix.project }}" = "www" ]; then
+            aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_WWW_DISTRIBUTION_ID }} --region ${{ secrets.AWS_REGION }} --paths "/_next/static/*" "/_next/image*"
+          elif [ "${{ matrix.project }}" = "admin" ]; then
+            aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_ADMIN_DISTRIBUTION_ID }} --region ${{ secrets.AWS_REGION }} --paths "/_next/static/*" "/_next/image*"
+          elif [ "${{ matrix.project }}" = "member" ]; then
+            aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_MEMBER_DISTRIBUTION_ID }} --region ${{ secrets.AWS_REGION }} --paths "/_next/static/*" "/_next/image*"
+          fi
+
+      # 13. 슬랙 알림: 배포 완료
+      - name: Notify Slack - Success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": ":white_check_mark: Deployment completed for `${{ matrix.project }}` on branch `${{ github.ref_name }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # 14. 슬랙 알림: 배포 실패
+      - name: Notify Slack - Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": ":x: Deployment failed for `${{ matrix.project }}` on branch `${{ github.ref_name }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
