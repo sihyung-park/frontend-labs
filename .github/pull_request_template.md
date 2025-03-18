@@ -2,9 +2,9 @@
 
 ## Branch Name
 
-- [ ] Dev
-- [ ] Main
-- [ ] 기타
+- [ ] DEV
+- [ ] MAIN
+- [ ] 기타 (필요시 적어주세요)
 
 <br/>
 
