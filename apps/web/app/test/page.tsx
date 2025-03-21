@@ -7,12 +7,6 @@ export default function Test() {
           alt="Open In Colab"
         />
       </a>
-      <a href="https://colab.research.google.com/github/sihyung-park/frontend-labs/blob/main/colab_test.ipynb">
-        <img
-          src="https://colab.research.google.com/assets/colab-badge.svg"
-          alt="Open In Colab"
-        />
-      </a>
     </div>
   );
 }
