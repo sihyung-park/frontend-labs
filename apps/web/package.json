@@ -1,14 +1,14 @@
 {
   "name": "web",
   "version": "0.1.0",
-  "type": "module",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack --port 3000",
     "build": "next build",
     "start": "next start",
     "lint": "next lint --max-warnings 0",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "graph": "npx depcruise src --include-only '^src' --config public/graphs/.dependency-cruiser.js --output-type dot | dot -Tsvg > public/graphs/dependency-graph.svg && open public/graphs/dependency-graph.svg"
   },
   "dependencies": {
     "@repo/ui": "*",
