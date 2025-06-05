@@ -1,0 +1,26 @@
+name: Auto PR from dev to main
+
+on:
+  schedule:
+    # 매주 월~금 18:00 (UTC 기준, 한국은 UTC+9이므로 09:00에 맞춰야 함)
+    - cron: "0 9 * * 1-5"
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          commit-message: "Auto PR: dev -> main"
+          base: main
+          branch: dev
+          assignees: sihyung-park
+          reviewers: sihyung-park
+          title: "자동 PR: dev -> main"
+          body: "평일 18시에 dev 브랜치의 변경사항을 main으로 PR합니다."
