@@ -18,6 +18,8 @@ const ThemeImage = (props: Props) => {
   );
 };
 
+console.log("hello");
+
 export default function Home() {
   return (
     <div className={styles.page}>
